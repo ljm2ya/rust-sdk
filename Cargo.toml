@@ -1,0 +1,48 @@
+[package]
+name = "rusk-sdk"
+version = "0.1.0"
+edition = "2024"
+description = "Unified venue SDK: Hyperliquid perps, Binance futures, Polymarket + prediction-market venue traits, and shared local orderbook management"
+
+[features]
+default = ["hyperliquid", "binance"]
+# Hyperliquid perp capsule + book streaming (vendored hypersdk carries a
+# local patch: `always_place` on BatchModify).
+hyperliquid = ["dep:hypersdk", "dep:either", "dep:futures-util"]
+# Binance USD-M futures trade WebSocket + depth streaming.
+binance = ["dep:hmac", "dep:sha2", "dep:hex", "dep:tokio-tungstenite", "dep:futures-util", "dep:reqwest"]
+# Prediction-market venue traits (error/types/venue) + Polymarket adapter.
+polymarket = [
+    "dep:polymarket_client_sdk_v2",
+    "dep:async-trait",
+    "dep:thiserror",
+    "dep:rust_decimal_macros",
+    "dep:futures-util",
+    "dep:reqwest",
+    "dep:k256",
+]
+
+[dependencies]
+anyhow = "1"
+dotenvy = "0.15"
+rust_decimal = "1.39"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time", "net"] }
+
+async-trait = { version = "0.1.89", optional = true }
+either = { version = "1", optional = true }
+futures-util = { version = "0.3.31", optional = true }
+hex = { version = "0.4.3", optional = true }
+hmac = { version = "0.12.1", optional = true }
+hypersdk = { path = "vendor/hypersdk", optional = true }
+k256 = { version = "0.13", default-features = false, features = ["ecdsa"], optional = true }
+polymarket_client_sdk_v2 = { version = "0.6", features = ["clob", "ws", "data", "gamma"], optional = true }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"], optional = true }
+rust_decimal_macros = { version = "1.40", optional = true }
+sha2 = { version = "0.10.9", optional = true }
+thiserror = { version = "2", optional = true }
+tokio-tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"], optional = true }
+
+[dev-dependencies]
+rustls = { version = "0.23", features = ["ring"] }

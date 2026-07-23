@@ -1,0 +1,217 @@
+## Package metadata
+[package]
+name = "hypersdk"
+version = "0.2.14"
+edition = "2024"
+authors = ["Dario <dario@infinitefieldtrading.com>"]
+license = "MPL-2.0"
+description = "Rust SDK for Hyperliquid"
+repository = "https://github.com/infinitefield/hypersdk"
+homepage = "https://github.com/infinitefield/hypersdk"
+readme = "README.md"
+keywords = ["hyperliquid", "sdk", "trading", "dex", "perps"]
+documentation = "https://docs.rs/hypersdk"
+rust-version = "1.85.0"
+
+include = [
+  "abi/**",
+  "src/**",
+  "README.md",
+  "LICENSE*",
+  "Cargo.toml",
+]
+exclude = [
+  "/.github/*",
+  "/examples/*",
+  "/tests/*",
+  "/.gitignore",
+]
+
+[[example]]
+name = "approve-agent"
+path = "examples/hypercore/approve_agent.rs"
+
+[[example]]
+name = "multisig-approve-agent"
+path = "examples/hypercore/multisig_approve_agent.rs"
+
+[[example]]
+name = "websocket-candles"
+path = "examples/hypercore/websocket-candles.rs"
+
+[[example]]
+name = "list-hip3"
+path = "examples/hypercore/list-hip3.rs"
+
+[[example]]
+name = "multisig_order"
+path = "examples/hypercore/multisig_order.rs"
+
+[[example]]
+name = "multisig_send_usd"
+path = "examples/hypercore/multisig_send_usd.rs"
+
+[[example]]
+name = "multisig_send_asset"
+path = "examples/hypercore/multisig_send_asset.rs"
+
+[[example]]
+name = "buy_and_transfer"
+path = "examples/hypercore/buy_and_transfer.rs"
+
+[[example]]
+name = "list-markets"
+path = "examples/hypercore/list-markets.rs"
+
+[[example]]
+name = "list-tokens"
+path = "examples/hypercore/list-tokens.rs"
+
+[[example]]
+name = "send_order"
+path = "examples/hypercore/send_order.rs"
+
+[[example]]
+name = "send_usd"
+path = "examples/hypercore/send_usd.rs"
+
+[[example]]
+name = "transfer_from_evm"
+path = "examples/hypercore/transfer_from_evm.rs"
+
+[[example]]
+name = "transfer_to_evm"
+path = "examples/hypercore/transfer_to_evm.rs"
+
+[[example]]
+name = "market_order"
+path = "examples/hypercore/market_order.rs"
+
+[[example]]
+name = "transfer_to_perps"
+path = "examples/hypercore/transfer_to_perps.rs"
+
+[[example]]
+name = "transfer_to_spot"
+path = "examples/hypercore/transfer_to_spot.rs"
+
+[[example]]
+name = "error_handling"
+path = "examples/hypercore/error_handling.rs"
+
+[[example]]
+name = "websocket"
+path = "examples/hypercore/websocket.rs"
+
+[[example]]
+name = "websocket-user-events"
+path = "examples/hypercore/websocket-user-events.rs"
+
+[[example]]
+name = "vault_details"
+path = "examples/hypercore/vault_details.rs"
+
+[[example]]
+name = "vault_transfer"
+path = "examples/hypercore/vault_transfer.rs"
+
+[[example]]
+name = "user_vault_equities"
+path = "examples/hypercore/user_vault_equities.rs"
+
+[[example]]
+name = "user_role"
+path = "examples/hypercore/user_role.rs"
+
+[[example]]
+name = "max_builder_fee"
+path = "examples/hypercore/max_builder_fee.rs"
+
+[[example]]
+name = "user_fees"
+path = "examples/hypercore/user_fees.rs"
+
+[[example]]
+name = "user_balances"
+path = "examples/hypercore/user_balances.rs"
+
+[[example]]
+name = "subaccounts"
+path = "examples/hypercore/subaccounts.rs"
+
+[[example]]
+name = "priority-fee-bid"
+path = "examples/hypercore/priority-fee-bid.rs"
+
+[[example]]
+name = "morpho_borrow_apy"
+path = "examples/morpho/borrow_apy.rs"
+
+[[example]]
+name = "morpho_create_market_events"
+path = "examples/morpho/create_market_events.rs"
+
+[[example]]
+name = "morpho_vault_performance"
+path = "examples/morpho/vault_performance.rs"
+
+[[example]]
+name = "morpho_highest_apy"
+path = "examples/morpho/highest_apy.rs"
+
+[[example]]
+name = "morpho_supply_apy"
+path = "examples/morpho/supply_apy.rs"
+
+[[example]]
+name = "morpho_vault_apy"
+path = "examples/morpho/vault_apy.rs"
+
+[[example]]
+name = "uniswap_pools_created"
+path = "examples/uniswap/pools_created.rs"
+
+[[example]]
+name = "uniswap_prjx_flows"
+path = "examples/uniswap/prjx_flows.rs"
+
+## Documentation (docs.rs) configuration
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+## Runtime dependencies
+[dependencies]
+alloy = { version = "2", default-features = false, features = ["contract", "eip712", "getrandom", "providers", "reqwest", "reqwest-rustls-tls", "rpc", "rpc-types", "signer-local", "signers", "sol-types"] }
+anyhow = "1"
+base64 = "0.22"
+thiserror = "2"
+const-hex = { version = "1.17", features = ["serde"] }
+derive_more = { version = "2", features = ["display", "is_variant"] }
+either = { version = "1", features = ["serde"] }
+flate2 = "1"
+futures = { version = "0.3", default-features = false, features = ["std"] }
+log = "0.4"
+reqwest = { version = "0.13", features = ["json"] }
+rmp-serde = "1"
+rust_decimal = { version = "1.39", features = ["macros", "maths", "serde", "serde-with-str"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_with = { version = "3", default-features = false, features = ["std"] }
+tokio = { version = "1", default-features = false, features = ["test-util", "time"] }
+tokio-util = { version = "0.7", default-features = false }
+url = "2"
+yawc = { version = "0.3", features = ["simd"] }
+hex-literal = "0.4"
+chrono = { version = "0.4", features = ["now"] }
+num-traits = "0.2"
+
+## Development and test dependencies
+[dev-dependencies]
+alloy = { version = "2", features = ["pubsub", "signer-keystore"], default-features = false }
+clap = { version = "4", features = ["derive"] }
+dotenvy = "0.15.7"
+indicatif = "0.18.3"
+rpassword = "7.4.0"
+simple_logger = "5"
+tokio = { version = "1", features = ["full"] }
