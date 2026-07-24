@@ -1,6 +1,6 @@
 # rusk-sdk
 
-Unified venue SDK extracted from the `perppair`, `mondayfuck`, and
+Unified venue SDK extracted from the `adr-arbitrager` (né perppair), `mondayfuck`, and
 `predictmm` bots, so every repo shares one implementation per venue.
 
 ## Modules
@@ -32,7 +32,7 @@ Unified venue SDK extracted from the `perppair`, `mondayfuck`, and
 
 ## Consumers
 
-- `../perppair` — `hyperliquid` feature only.
+- `../adr-arbitrager` — `hyperliquid` feature only.
 - `../mondayfuck` — `hyperliquid` + `binance`.
 - `../predictmm` — `polymarket` feature (re-exports `error`/`types`/`venue`/
   `polymarket`; its Pascal and HIP-4 Hyperliquid adapters build on the same
