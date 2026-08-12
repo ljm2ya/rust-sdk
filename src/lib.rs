@@ -11,11 +11,19 @@
 //!   this book internally and emit ready-to-use book states.
 //! - [`hyperliquid`] *(feature `hyperliquid`, default)* — perp venue capsule
 //!   (place/modify/cancel/fetch/positions on the market's real tick + size
-//!   grids) and [`hyperliquid::stream_book`] (fast/slow WS + optional REST
-//!   overlay, emitting managed [`book::OrderBook`] states).
+//!   grids), [`hyperliquid::stream_book`] (fast/slow WS + optional REST
+//!   overlay, emitting managed [`book::OrderBook`] states) and
+//!   [`hyperliquid::stream_user_events`] (private `userFills` and
+//!   `orderUpdates` WS).
 //! - [`binance`] *(feature `binance`, default)* — USD-M futures trade
 //!   WebSocket capsule and [`binance::stream_book`] (depth diffs applied to
 //!   a managed local book with automatic snapshot resync).
+//! - [`lighter`] *(feature `lighter`, default)* — Lighter (zkLighter) perp
+//!   venue capsule (place/modify/cancel/fetch on the market's wire grids,
+//!   positions, account summary) plus [`lighter::stream_book`]
+//!   (`order_book/{market_id}` WS channel with nonce-continuity resync).
+//!   Transaction signing runs through the vendored official Go signer
+//!   shared library (`vendor/lighter-signer`).
 //! - [`error`] / [`types`] / [`venue`] / [`polymarket`] *(feature
 //!   `polymarket`)* — the prediction-market venue abstraction
 //!   ([`venue::OrderbookTrader`]) and the Polymarket adapter, extracted from
@@ -30,6 +38,11 @@
 //! | hyperliquid | `HYPERLIQUID_COIN_<NAME>` | per-coin market override |
 //! | binance | `BINANCE_API_KEY` / `BINANCE_API_SECRET` | trade WS credentials |
 //! | binance | `PRICE_DECIMALS` / `QTY_DECIMALS` | log/modify formatting |
+//! | lighter | `LIGHTER_PRIVATE_KEY` / `LIGHTER_PUBLIC_KEY` | API key pair (trading mode) |
+//! | lighter | `LIGHTER_ACCOUNT_INDEX` | account index (else derived from `WALLET_ADDRESS`) |
+//! | lighter | `LIGHTER_API_KEY_INDEX` | API key slot, default `2` |
+//! | lighter | `LIGHTER_BASE_URL` | REST base, default mainnet |
+//! | lighter | `LIGHTER_SIGNER_LIB` | signer shared-library override |
 //! | polymarket | `POLYMARKET_PRIVATE_KEY` | EOA private key |
 
 pub mod book;
@@ -39,6 +52,8 @@ pub mod order;
 pub mod binance;
 #[cfg(feature = "hyperliquid")]
 pub mod hyperliquid;
+#[cfg(feature = "lighter")]
+pub mod lighter;
 
 #[cfg(feature = "polymarket")]
 pub mod error;
@@ -53,7 +68,7 @@ pub mod venue;
 pub use error::{Error, Result};
 #[cfg(feature = "polymarket")]
 pub use types::{
-    Level, MarketId, Order, Orderbook, OrderStatus, OrderType, PlaceOrderRequest, Position, Side,
+    Level, MarketId, Order, OrderStatus, OrderType, Orderbook, PlaceOrderRequest, Position, Side,
     TimeInForce,
 };
 #[cfg(feature = "polymarket")]

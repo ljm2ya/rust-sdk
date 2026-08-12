@@ -5,12 +5,23 @@ edition = "2024"
 description = "Unified venue SDK: Hyperliquid perps, Binance futures, Polymarket + prediction-market venue traits, and shared local orderbook management"
 
 [features]
-default = ["hyperliquid", "binance"]
+default = ["hyperliquid", "binance", "lighter"]
 # Hyperliquid perp capsule + book streaming (vendored hypersdk carries a
 # local patch: `always_place` on BatchModify).
 hyperliquid = ["dep:hypersdk", "dep:either", "dep:futures-util"]
 # Binance USD-M futures trade WebSocket + depth streaming.
 binance = ["dep:hmac", "dep:sha2", "dep:hex", "dep:tokio-tungstenite", "dep:futures-util", "dep:reqwest"]
+# Lighter (zkLighter) perp capsule: REST + WS book streaming, signing via the
+# vendored official Go signer shared library (see vendor/lighter-signer).
+lighter = [
+    "dep:libloading",
+    "dep:reqwest",
+    "dep:tokio-tungstenite",
+    "dep:futures-util",
+    "dep:hex",
+    "dep:k256",
+    "dep:sha3",
+]
 # Prediction-market venue traits (error/types/venue) + Polymarket adapter.
 polymarket = [
     "dep:polymarket_client_sdk_v2",
@@ -37,10 +48,12 @@ hex = { version = "0.4.3", optional = true }
 hmac = { version = "0.12.1", optional = true }
 hypersdk = { path = "vendor/hypersdk", optional = true }
 k256 = { version = "0.13", default-features = false, features = ["ecdsa"], optional = true }
+libloading = { version = "0.8", optional = true }
 polymarket_client_sdk_v2 = { version = "0.6", features = ["clob", "ws", "data", "gamma"], optional = true }
-reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"], optional = true }
+reqwest = { version = "0.13", default-features = false, features = ["json", "query", "form", "rustls"], optional = true }
 rust_decimal_macros = { version = "1.40", optional = true }
 sha2 = { version = "0.10.9", optional = true }
+sha3 = { version = "0.10", optional = true }
 thiserror = { version = "2", optional = true }
 tokio-tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"], optional = true }
 

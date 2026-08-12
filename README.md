@@ -23,6 +23,19 @@ Unified venue SDK extracted from the `adr-arbitrager` (né perppair), `mondayfuc
   retry) and `stream_book(symbol, rest_gate, tx)`: depth diffs applied to a
   managed local book with automatic snapshot resync, emitting
   `BookUpdate::{Book, Notice}`.
+- `lighter` *(feature, default)* — Lighter (zkLighter) perp venue capsule:
+  `connect` (read-only) / `connect_trading`, `place_limit`,
+  `place_post_only`, `place_market` (synthetic IOC crossing ±5%),
+  `modify_order`, `cancel_order` (both keyed by client order index),
+  `fetch_order`, `open_orders`, `position_snapshot`, `account_summary`,
+  `book`/`mid_price` — all scaled onto the market's wire price/size
+  decimals, with local nonce management (resynced on rejection).
+  `stream_book(symbol, tx)` follows the `order_book/{market_id}` WS channel
+  (snapshot + zero-size-delete state changes, nonce-continuity resync).
+  Transaction signing runs through the official Go signer built as a C
+  shared library (`vendor/lighter-signer`, same binary the Python SDK
+  ships), loaded at runtime; `lighter::bootstrap_api_key` registers a fresh
+  API key via `ChangePubKey` co-signed by the L1 wallet key.
 - `error` / `types` / `venue` / `polymarket` *(feature `polymarket`)* — the
   prediction-market venue abstraction (`OrderbookTrader`) and the Polymarket
   adapter, extracted from predictmm (which re-exports them).
@@ -51,3 +64,17 @@ override with `RUSK_LIVE_COIN`):
 ```sh
 cargo test --test hyperliquid_live -- --ignored --nocapture --test-threads=1
 ```
+
+Live real-order Lighter tests (`#[ignore]`d; needs `LIGHTER_PRIVATE_KEY` +
+`LIGHTER_ACCOUNT_INDEX`/`WALLET_ADDRESS`; market defaults to `PAXG`,
+override with `RUSK_LIGHTER_MARKET`; one-time key setup via
+`live_bootstrap_api_key` with `RUSK_LIGHTER_BOOTSTRAP=1`):
+
+```sh
+cargo test --test lighter_live -- --ignored --nocapture --test-threads=1
+```
+
+Notes: `live_order_roundtrip` rests a ~$10 maker order (Lighter's maker
+minimum) and needs enough collateral for its initial margin;
+`live_market_fill_and_flatten` sends the smallest venue-accepted taker
+order (a few size steps — maker minimums don't apply to takers).
