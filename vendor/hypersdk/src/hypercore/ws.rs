@@ -119,6 +119,7 @@
 use std::{
     collections::HashSet,
     pin::Pin,
+    sync::Arc,
     task::{Context, Poll, ready},
     time::Duration,
 };
@@ -218,10 +219,17 @@ type SubChannelData = (bool, Subscription);
 /// the background reconnect loop exits gracefully.
 #[derive(Clone)]
 struct ConnectionGuard {
-    /// Held solely to keep the token alive. When all guards drop, the token
-    /// is cancelled and the background task exits.
-    #[allow(dead_code)]
+    _inner: Arc<ConnectionGuardInner>,
+}
+
+struct ConnectionGuardInner {
     token: CancellationToken,
+}
+
+impl Drop for ConnectionGuardInner {
+    fn drop(&mut self) {
+        self.token.cancel();
+    }
 }
 
 /// WebSocket event representing either a connection state change or a data message.
@@ -425,6 +433,9 @@ pub struct ConnectionHandle {
 #[allow(dead_code)]
 pub struct ConnectionStream {
     rx: UnboundedReceiver<Event>,
+    /// Keeps the subscription control channel open while the stream half is
+    /// alive, matching the shared connection ownership contract.
+    _tx: UnboundedSender<SubChannelData>,
     /// Keeps the CancellationToken alive; dropping this stream may trigger
     /// graceful shutdown of the background task if it was the last reference.
     #[allow(dead_code)]
@@ -454,7 +465,9 @@ impl Connection {
         Self {
             rx,
             tx: stx,
-            guard: ConnectionGuard { token },
+            guard: ConnectionGuard {
+                _inner: Arc::new(ConnectionGuardInner { token }),
+            },
         }
     }
 
@@ -506,11 +519,12 @@ impl Connection {
     pub fn split(self) -> (ConnectionHandle, ConnectionStream) {
         (
             ConnectionHandle {
-                tx: self.tx,
+                tx: self.tx.clone(),
                 guard: self.guard.clone(),
             },
             ConnectionStream {
                 rx: self.rx,
+                _tx: self.tx,
                 guard: self.guard,
             },
         )
@@ -681,7 +695,7 @@ async fn connection(
                     }
                 }
                 item = srx.recv() => {
-                    let Some((is_sub, sub)) = item else { return };
+                    let Some((is_sub, sub)) = item else { break };
                     if is_sub {
                         if !subs.insert(sub.clone()) {
                             log::debug!("Already subscribed to {sub:?}");
@@ -707,9 +721,53 @@ async fn connection(
             }
         }
 
-        log::info!("Disconnected from {url}, attempting to reconnect...");
+        // Explicitly remove every server-side subscription before a
+        // controlled shutdown or reconnect. A broken socket may reject these
+        // requests, but every path still makes the unsubscribe attempt.
+        for sub in subs.iter() {
+            match timeout(Duration::from_secs(1), stream.unsubscribe(sub.clone())).await {
+                Ok(Ok(())) => {}
+                Ok(Err(err)) => {
+                    log::debug!("Unsubscribe before disconnect failed for {sub}: {err:?}")
+                }
+                Err(_) => log::debug!("Unsubscribe before disconnect timed out for {sub}"),
+            }
+        }
+
+        let shutting_down = shutdown.is_cancelled() || srx.is_closed();
+        log::info!(
+            "Disconnected from {url}{}",
+            if shutting_down {
+                ""
+            } else {
+                ", attempting to reconnect..."
+            }
+        );
         let _ = tx.send(Event::Disconnected);
+        if shutting_down {
+            break;
+        }
     }
 
     log::debug!("WebSocket background task shutting down");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dropping_last_connection_guard_triggers_shutdown() {
+        let token = CancellationToken::new();
+        let guard = ConnectionGuard {
+            _inner: Arc::new(ConnectionGuardInner {
+                token: token.clone(),
+            }),
+        };
+        let clone = guard.clone();
+        drop(guard);
+        assert!(!token.is_cancelled());
+        drop(clone);
+        assert!(token.is_cancelled());
+    }
 }

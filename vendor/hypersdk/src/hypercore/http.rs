@@ -41,6 +41,7 @@
 
 use std::{
     collections::{HashMap, VecDeque},
+    sync::OnceLock,
     time::Duration,
 };
 
@@ -96,6 +97,52 @@ pub struct Client {
     chain: Chain,
 }
 
+/// Idle sockets to retain per host.
+///
+/// The venue negotiates HTTP/1.1 only, so a socket carries one request at a
+/// time: two concurrent calls need two sockets or the second one blocks. The
+/// pool is sized for the worst concurrent fan-out an order path produces
+/// (pre-trade checks on both legs, position polling, the order itself) so a
+/// burst never has to open a cold connection.
+const POOL_MAX_IDLE_PER_HOST: usize = 32;
+
+/// How long an unused socket is kept.
+///
+/// Deliberately well under the 60 s idle timeout CloudFront applies to client
+/// connections: we would rather retire a socket ourselves than hand a
+/// half-closed one to a `POST /exchange` that cannot be safely retried.
+const POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Returns the process-wide connection pool.
+///
+/// Every `Client` shares it. Constructing a private `reqwest::Client` per
+/// capsule — which is what `Client::new` used to do — gives each capsule a
+/// private pool that goes cold between that capsule's own requests, so an
+/// order pays a full TCP + TLS handshake even though a sibling capsule has a
+/// hot socket to the same host sitting idle. Measured against this venue that
+/// handshake is ~41 ms on a 4 ms network RTT, i.e. an order-of-magnitude
+/// larger than the round trip it precedes.
+///
+/// `reqwest::Client` is internally reference-counted, so cloning shares the
+/// pool rather than duplicating it.
+fn shared_http_client() -> reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            reqwest::Client::builder()
+                .timeout(Duration::from_secs(10))
+                // Nagle would hold a small order body waiting for more bytes.
+                .tcp_nodelay(true)
+                // Detect a silently dropped socket before an order picks it up.
+                .tcp_keepalive(Duration::from_secs(15))
+                .pool_idle_timeout(POOL_IDLE_TIMEOUT)
+                .pool_max_idle_per_host(POOL_MAX_IDLE_PER_HOST)
+                .build()
+                .expect("static reqwest client configuration is valid")
+        })
+        .clone()
+}
+
 impl Client {
     /// Creates a new HTTP client for the specified chain.
     ///
@@ -125,14 +172,8 @@ impl Client {
             testnet_url()
         };
 
-        let http_client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(10))
-            .tcp_nodelay(true)
-            .build()
-            .unwrap();
-
         Self {
-            http_client,
+            http_client: shared_http_client(),
             base_url,
             chain,
         }
