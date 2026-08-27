@@ -140,6 +140,16 @@ impl OrderBook {
         self.asks.keys().next().map(|p| key_to_price(*p))
     }
 
+    /// Best bid as (price, qty).
+    pub fn best_bid_level(&self) -> Option<(f64, f64)> {
+        self.bids.iter().next_back().map(|(p, q)| (key_to_price(*p), *q))
+    }
+
+    /// Best ask as (price, qty).
+    pub fn best_ask_level(&self) -> Option<(f64, f64)> {
+        self.asks.iter().next().map(|(p, q)| (key_to_price(*p), *q))
+    }
+
     pub fn mid(&self) -> Option<f64> {
         Some((self.best_bid()? + self.best_ask()?) / 2.0)
     }
