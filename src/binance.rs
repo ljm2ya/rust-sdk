@@ -47,31 +47,111 @@ static REQ_ID: AtomicU64 = AtomicU64::new(1);
 /// Gate closure for REST snapshot fetches (e.g. skip near a market close).
 pub type RestGate = Arc<dyn Fn() -> bool + Send + Sync>;
 
+/// Per-symbol trading grids from `exchangeInfo` (price/quantity precision
+/// and filters), resolved once at connect time.
+#[derive(Clone, Debug)]
+pub struct SymbolInfo {
+    /// Max decimal places accepted in prices (`pricePrecision`).
+    pub price_decimals: u32,
+    /// Max decimal places accepted in quantities (`quantityPrecision`).
+    pub qty_decimals: u32,
+    /// PRICE_FILTER tick.
+    pub tick_size: f64,
+    /// LOT_SIZE step.
+    pub step_size: f64,
+    /// LOT_SIZE minimum quantity.
+    pub min_qty: f64,
+    /// MIN_NOTIONAL floor in quote units.
+    pub min_notional: f64,
+}
+
+/// Fetch `exchangeInfo` grids for one symbol.
+pub async fn fetch_symbol_info(symbol: &str) -> anyhow::Result<SymbolInfo> {
+    let url = format!(
+        "https://fapi.binance.com/fapi/v1/exchangeInfo?symbol={}",
+        symbol.to_uppercase()
+    );
+    let value: Value = reqwest::get(url).await?.error_for_status()?.json().await?;
+    let info = value["symbols"]
+        .as_array()
+        .and_then(|symbols| {
+            symbols
+                .iter()
+                .find(|s| s["symbol"].as_str() == Some(&symbol.to_uppercase()))
+        })
+        .context("symbol missing from exchangeInfo")?;
+    let filter = |kind: &str, key: &str| -> f64 {
+        info["filters"]
+            .as_array()
+            .and_then(|filters| filters.iter().find(|f| f["filterType"].as_str() == Some(kind)))
+            .and_then(|f| f[key].as_str())
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0.0)
+    };
+    Ok(SymbolInfo {
+        price_decimals: info["pricePrecision"].as_u64().unwrap_or(2) as u32,
+        qty_decimals: info["quantityPrecision"].as_u64().unwrap_or(2) as u32,
+        tick_size: filter("PRICE_FILTER", "tickSize"),
+        step_size: filter("LOT_SIZE", "stepSize"),
+        min_qty: filter("LOT_SIZE", "minQty"),
+        min_notional: filter("MIN_NOTIONAL", "notional"),
+    })
+}
+
+/// Truncate `value` onto a decimal grid and render with exactly that many
+/// decimals (Binance rejects extra decimals with `-1111`).
+fn format_on_grid(value: f64, decimals: u32) -> String {
+    let scale = 10f64.powi(decimals as i32);
+    format!("{:.*}", decimals as usize, (value * scale).round() / scale)
+}
+
+fn floor_on_grid(value: f64, decimals: u32) -> String {
+    let scale = 10f64.powi(decimals as i32);
+    format!("{:.*}", decimals as usize, (value * scale + 1e-9).floor() / scale)
+}
+
+/// Snap a price onto the PRICE_FILTER tick grid. The tick can be coarser
+/// than the `pricePrecision` decimal grid (e.g. tickSize 0.10 with
+/// pricePrecision 2), and off-tick prices are rejected with `-4014`
+/// ("Price not increased by tick size").
+fn snap_to_tick(price: f64, tick: f64) -> f64 {
+    if tick > 0.0 { (price / tick).round() * tick } else { price }
+}
+
 /// Binance USD-M futures trade WebSocket capsule for a single symbol.
 pub struct BinanceFutures {
     ws: Option<WebSocketStream<MaybeTlsStream<TcpStream>>>,
     api_key: String,
     secret: String,
     symbol: String,
+    info: SymbolInfo,
 }
 
 impl BinanceFutures {
     /// Connect the trade WebSocket. Needs `BINANCE_API_KEY` /
-    /// `BINANCE_API_SECRET`.
+    /// `BINANCE_API_SECRET`. Also resolves the symbol's price/quantity
+    /// grids from `exchangeInfo` so orders are formatted exactly.
     pub async fn connect(symbol: &str) -> anyhow::Result<Self> {
         crate::load_dotenv();
         let api_key = env::var("BINANCE_API_KEY").context("BINANCE_API_KEY is required")?;
         let secret = env::var("BINANCE_API_SECRET").context("BINANCE_API_SECRET is required")?;
+        let info = fetch_symbol_info(symbol).await?;
         Ok(Self {
             ws: Some(connect_trade_ws().await?),
             api_key,
             secret,
             symbol: symbol.to_uppercase(),
+            info,
         })
     }
 
     pub fn symbol(&self) -> &str {
         &self.symbol
+    }
+
+    /// Trading grids resolved at connect time.
+    pub fn symbol_info(&self) -> &SymbolInfo {
+        &self.info
     }
 
     async fn signed_request(&mut self, method: &str, params: Params<String, Value>) -> anyhow::Result<Value> {
@@ -118,24 +198,42 @@ impl BinanceFutures {
         bail!("Binance trade WebSocket ended")
     }
 
-    /// Place a GTC limit order (price/entry quantities truncated to 2
-    /// decimals as on the original CLUSDT deployment; reduce-only sizes are
-    /// sent verbatim so a close can never be inflated).
+    /// Place a GTC limit order. Prices and quantities are formatted onto the
+    /// symbol's `exchangeInfo` grids (extra decimals are rejected by the
+    /// venue with `-1111`).
     pub async fn place_limit(&mut self, side: Side, qty: f64, price: f64, reduce_only: bool) -> anyhow::Result<ActiveOrder> {
+        self.place_limit_tif(side, qty, price, reduce_only, "GTC").await
+    }
+
+    /// Limit order with an explicit time-in-force. `"IOC"` + a crossing
+    /// price is the synthetic market order on this venue: it fills against
+    /// the book immediately and the remainder is canceled by the venue.
+    /// Keep the cross small (~1%) — the PERCENT_PRICE filter rejects limit
+    /// prices further than a few percent from mark price (`-4024`).
+    pub async fn place_limit_tif(
+        &mut self,
+        side: Side,
+        qty: f64,
+        price: f64,
+        reduce_only: bool,
+        tif: &str,
+    ) -> anyhow::Result<ActiveOrder> {
         let mut params = Params::new();
         params.insert("symbol".to_string(), json!(self.symbol));
         params.insert("side".to_string(), json!(side.as_str()));
         params.insert("type".to_string(), json!("LIMIT"));
-        params.insert("timeInForce".to_string(), json!("GTC"));
+        params.insert("timeInForce".to_string(), json!(tif));
         params.insert(
             "quantity".to_string(),
-            json!(if reduce_only {
-                qty.to_string()
-            } else {
-                format!("{:.2}", (qty * 100.0).trunc() / 100.0)
-            }),
+            json!(floor_on_grid(qty, self.info.qty_decimals)),
         );
-        params.insert("price".to_string(), json!(format!("{:.2}", (price * 100.0).trunc() / 100.0)));
+        params.insert(
+            "price".to_string(),
+            json!(format_on_grid(
+                snap_to_tick(price, self.info.tick_size),
+                self.info.price_decimals
+            )),
+        );
         params.insert("positionSide".to_string(), json!("BOTH"));
         if reduce_only {
             params.insert("reduceOnly".to_string(), json!("true"));
@@ -175,6 +273,52 @@ impl BinanceFutures {
         Ok(pos.parse()?)
     }
 
+    /// Available USDT margin balance for placing new orders
+    /// (`v2/account.balance` -> `availableBalance`).
+    pub async fn available_balance(&mut self) -> anyhow::Result<f64> {
+        let result = self.signed_request("v2/account.balance", Params::new()).await?;
+        let balances = result.as_array().context("balance result is not an array")?;
+        let avail = balances
+            .iter()
+            .find(|b| b["asset"].as_str() == Some("USDT"))
+            .and_then(|b| b["availableBalance"].as_str())
+            .unwrap_or("0");
+        Ok(avail.parse()?)
+    }
+
+    /// Leverage currently configured for this symbol. Uses the signed REST
+    /// `/fapi/v2/positionRisk` endpoint, which reports `leverage` even for a
+    /// flat symbol (the WS `v2/account.position` result omits it there).
+    pub async fn position_leverage(&mut self) -> anyhow::Result<f64> {
+        let mut params = Params::new();
+        params.insert("symbol".to_string(), json!(self.symbol));
+        params.insert("timestamp".to_string(), json!(now_ms()?));
+        let signature = sign_params(&params, &self.secret)?;
+        let query = params
+            .iter()
+            .map(|(key, value)| format!("{key}={}", param_value(value)))
+            .collect::<Vec<_>>()
+            .join("&");
+        let url = format!("https://fapi.binance.com/fapi/v2/positionRisk?{query}&signature={signature}");
+        let client = reqwest::Client::new();
+        let result: Value = client
+            .get(url)
+            .header("X-MBX-APIKEY", &self.api_key)
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        let positions = result.as_array().context("positionRisk result is not an array")?;
+        let leverage = positions
+            .iter()
+            .find(|p| p["symbol"].as_str() == Some(self.symbol.as_str()))
+            .and_then(|p| p["leverage"].as_str())
+            .and_then(|s| s.parse::<f64>().ok())
+            .unwrap_or(1.0);
+        Ok(leverage.max(1.0))
+    }
+
     /// Re-price a live order. `Ok(true)` — still live (or no change needed,
     /// `-5027`); `Ok(false)` — the order no longer exists (`-2013`).
     pub async fn modify_order(&mut self, order: &ActiveOrder, price: f64) -> anyhow::Result<bool> {
@@ -182,8 +326,14 @@ impl BinanceFutures {
         params.insert("symbol".to_string(), json!(self.symbol));
         params.insert("orderId".to_string(), json!(order.order_id));
         params.insert("side".to_string(), json!(order.side.as_str()));
-        params.insert("quantity".to_string(), json!(format_qty(order.qty)));
-        params.insert("price".to_string(), json!(format!("{:.2}", (price * 100.0).trunc() / 100.0)));
+        params.insert("quantity".to_string(), json!(floor_on_grid(order.qty, self.info.qty_decimals)));
+        params.insert(
+            "price".to_string(),
+            json!(format_on_grid(
+                snap_to_tick(price, self.info.tick_size),
+                self.info.price_decimals
+            )),
+        );
         match self.signed_request("order.modify", params).await {
             Ok(_) => Ok(true),
             Err(err) if err.to_string().contains("-2013") => Ok(false),

@@ -24,6 +24,20 @@
 //!   (`order_book/{market_id}` WS channel with nonce-continuity resync).
 //!   Transaction signing runs through the vendored official Go signer
 //!   shared library (`vendor/lighter-signer`).
+//! - [`upbit`] *(feature `upbit`, default)* — Upbit spot venue capsule
+//!   (JWT-signed REST: limit/market orders keyed by numeric client
+//!   identifiers, fetch/cancel, open orders, balances, fees,
+//!   deposit/withdraw queries; public ticker / book / trades / candles with
+//!   KRW tick-grid rounding), [`upbit::stream_book`] (full-snapshot WS
+//!   books) and [`upbit::stream_user_events`] (private `myOrder` /
+//!   `myAsset` WS).
+//! - [`coinone`] *(feature `coinone`, default)* — Coinone spot venue capsule
+//!   (HMAC-SHA512-signed REST: limit/market orders keyed by numeric client
+//!   ids echoed via `user_order_id`, fetch/cancel, open orders, balances,
+//!   trade fees; public ticker / book / trades / candles rounded onto the
+//!   market's `price_unit`/`qty_unit` grids), [`coinone::stream_book`]
+//!   (full-snapshot `ORDERBOOK` WS) and [`coinone::stream_user_events`]
+//!   (private `MYORDER` / `MYASSET` WS).
 //! - [`error`] / [`types`] / [`venue`] / [`polymarket`] *(feature
 //!   `polymarket`)* — the prediction-market venue abstraction
 //!   ([`venue::OrderbookTrader`]) and the Polymarket adapter, extracted from
@@ -43,6 +57,8 @@
 //! | lighter | `LIGHTER_API_KEY_INDEX` | API key slot, default `2` |
 //! | lighter | `LIGHTER_BASE_URL` | REST base, default mainnet |
 //! | lighter | `LIGHTER_SIGNER_LIB` | signer shared-library override |
+//! | upbit | `UPBIT_ACCESS_KEY` / `UPBIT_SECRET_KEY` | JWT credentials (trading mode + private WS) |
+//! | coinone | `COINONE_ACCESS_TOKEN` / `COINONE_SECRET_KEY` | HMAC credentials (trading mode + private WS) |
 //! | polymarket | `POLYMARKET_PRIVATE_KEY` | EOA private key |
 
 pub mod book;
@@ -50,10 +66,14 @@ pub mod order;
 
 #[cfg(feature = "binance")]
 pub mod binance;
+#[cfg(feature = "coinone")]
+pub mod coinone;
 #[cfg(feature = "hyperliquid")]
 pub mod hyperliquid;
 #[cfg(feature = "lighter")]
 pub mod lighter;
+#[cfg(feature = "upbit")]
+pub mod upbit;
 
 #[cfg(feature = "polymarket")]
 pub mod error;

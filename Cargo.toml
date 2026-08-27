@@ -5,7 +5,7 @@ edition = "2024"
 description = "Unified venue SDK: Hyperliquid perps, Binance futures, Polymarket + prediction-market venue traits, and shared local orderbook management"
 
 [features]
-default = ["hyperliquid", "binance", "lighter"]
+default = ["hyperliquid", "binance", "lighter", "upbit", "coinone"]
 # Hyperliquid perp capsule + book streaming (vendored hypersdk carries a
 # local patch: `always_place` on BatchModify).
 hyperliquid = ["dep:hypersdk", "dep:either", "dep:futures-util"]
@@ -21,6 +21,30 @@ lighter = [
     "dep:hex",
     "dep:k256",
     "dep:sha3",
+]
+# Upbit spot venue capsule: JWT-signed REST (hand-rolled HS256 JWT, ported
+# from kimp-arbitrager) + public/private WS streaming.
+upbit = [
+    "dep:reqwest",
+    "dep:tokio-tungstenite",
+    "dep:futures-util",
+    "dep:hmac",
+    "dep:sha2",
+    "dep:hex",
+    "dep:base64",
+    "dep:uuid",
+]
+# Coinone spot venue capsule: HMAC-SHA512-signed REST (base64 payload
+# headers, ported from kimp-arbitrager) + public/private WS streaming.
+coinone = [
+    "dep:reqwest",
+    "dep:tokio-tungstenite",
+    "dep:futures-util",
+    "dep:hmac",
+    "dep:sha2",
+    "dep:hex",
+    "dep:base64",
+    "dep:uuid",
 ]
 # Prediction-market venue traits (error/types/venue) + Polymarket adapter.
 polymarket = [
@@ -42,6 +66,7 @@ serde_json = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time", "net"] }
 
 async-trait = { version = "0.1.89", optional = true }
+base64 = { version = "0.22", optional = true }
 either = { version = "1", optional = true }
 futures-util = { version = "0.3.31", optional = true }
 hex = { version = "0.4.3", optional = true }
@@ -56,6 +81,7 @@ sha2 = { version = "0.10.9", optional = true }
 sha3 = { version = "0.10", optional = true }
 thiserror = { version = "2", optional = true }
 tokio-tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"], optional = true }
+uuid = { version = "1", features = ["v4"], optional = true }
 
 [dev-dependencies]
 rustls = { version = "0.23", features = ["ring"] }

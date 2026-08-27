@@ -36,6 +36,36 @@ Unified venue SDK extracted from the `adr-arbitrager` (né perppair), `mondayfuc
   shared library (`vendor/lighter-signer`, same binary the Python SDK
   ships), loaded at runtime; `lighter::bootstrap_api_key` registers a fresh
   API key via `ChangePubKey` co-signed by the L1 wallet key.
+- `upbit` *(feature, default)* — Upbit spot venue capsule (`Upbit`):
+  `connect` (public data only) / `connect_trading`, `place_limit` /
+  `place_post_only` (KRW tick-grid rounding, 5,000 KRW minimum checked
+  client-side), `market_buy` (by quote total) / `market_sell`,
+  `fetch_order`, `cancel_order`, `open_orders`, `cancel_all_orders` — all
+  keyed by a numeric client identifier the SDK generates (sent as Upbit's
+  `identifier`; the venue-side order UUID is tracked internally) — plus
+  `balances`, `order_chance_fees`, deposit/withdraw queries, and public
+  ticker / book / trades / candles. Signing is a hand-rolled HS256 JWT with
+  a SHA512 query hash (always over the query-string form, even for JSON
+  POST bodies — golden-tested against the reference implementation).
+  `stream_book(market, tx)` emits full-snapshot WS books;
+  `stream_user_events(tx)` follows the private `myOrder`/`myAsset` WS.
+- `coinone` *(feature, default)* — Coinone spot venue capsule (`Coinone`):
+  `connect` (public data only, market metadata cached) / `connect_trading`,
+  `place_limit` / `place_post_only` (prices rounded onto the market's
+  `price_unit`, sizes truncated onto `qty_unit`, `min_order_amount` checked
+  client-side), `market_buy` (by quote total) / `market_sell`,
+  `fetch_order`, `cancel_order`, `open_orders`, `cancel_all_orders` — all
+  keyed by a numeric client id sent as Coinone's `user_order_id` (the
+  venue-side order UUID is tracked internally; the active-order list does
+  not echo client ids, so foreign/other-process orders list as id 0 and
+  `cancel_order` falls back to `user_order_id`) — plus `balances`,
+  `trade_fees` (percent-style rates
+  normalized), and public ticker / book / trades / candles. Signing:
+  base64(JSON payload) in `X-COINONE-PAYLOAD` + HMAC-SHA512 hex in
+  `X-COINONE-SIGNATURE`, body byte-identical to the signed payload;
+  `result`/`error_code` checked even on HTTP 200. `stream_book(market, tx)`
+  emits full-snapshot WS books; `stream_user_events(tx)` follows the
+  private `MYORDER`/`MYASSET` WS.
 - `error` / `types` / `venue` / `polymarket` *(feature `polymarket`)* — the
   prediction-market venue abstraction (`OrderbookTrader`) and the Polymarket
   adapter, extracted from predictmm (which re-exports them).
@@ -72,6 +102,24 @@ override with `RUSK_LIGHTER_MARKET`; one-time key setup via
 
 ```sh
 cargo test --test lighter_live -- --ignored --nocapture --test-threads=1
+```
+
+Live real-order Upbit tests (`#[ignore]`d; needs `UPBIT_ACCESS_KEY` /
+`UPBIT_SECRET_KEY`; market defaults to `KRW-BTC`, override with
+`RUSK_UPBIT_MARKET`; the roundtrip rests a ~5,500 KRW deep bid that never
+fills and always cleans up):
+
+```sh
+cargo test --test upbit_live -- --ignored --nocapture --test-threads=1
+```
+
+Live real-order Coinone tests (`#[ignore]`d; needs `COINONE_ACCESS_TOKEN` /
+`COINONE_SECRET_KEY`; market defaults to `KRW-BTC`, override with
+`RUSK_COINONE_MARKET`; the roundtrip rests a deep bid just above the
+market minimum that never fills and always cleans up):
+
+```sh
+cargo test --test coinone_live -- --ignored --nocapture --test-threads=1
 ```
 
 Notes: `live_order_roundtrip` rests a ~$10 maker order (Lighter's maker
