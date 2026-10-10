@@ -30,8 +30,8 @@ Unified venue SDK extracted from the `adr-arbitrager` (né perppair), `mondayfuc
   `fetch_order`, `open_orders`, `position_snapshot`, `account_summary`,
   `book`/`mid_price` — all scaled onto the market's wire price/size
   decimals, with local nonce management (resynced on rejection).
-  `stream_book(symbol, tx)` follows the `order_book/{market_id}` WS channel
-  (snapshot + zero-size-delete state changes, nonce-continuity resync).
+  `stream_books(wanted, tx)` shares one WebSocket across subscribed markets,
+  applying snapshots and zero-size-delete state changes with nonce-continuity resync.
   Transaction signing runs through the official Go signer built as a C
   shared library (`vendor/lighter-signer`, same binary the Python SDK
   ships), loaded at runtime; `lighter::bootstrap_api_key` registers a fresh

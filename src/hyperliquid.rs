@@ -218,6 +218,12 @@ async fn acquire_info(weight: u32) {
     rate_limits().acquire(weight, false).await;
 }
 
+/// Meter an info request made OUTSIDE this module (raw `/info` calls such
+/// as `candleSnapshot`, weight 20) against the shared per-IP budget.
+pub async fn acquire_info_weight(weight: u32) {
+    acquire_info(weight).await;
+}
+
 async fn acquire_action(cancel: bool, batch_len: usize) {
     rate_limits()
         .acquire(exchange_action_weight(batch_len), cancel)
@@ -288,6 +294,11 @@ pub struct SubmitTiming {
     pub sign: Duration,
     /// The `/exchange` request and response, including any TLS handshake.
     pub http: Duration,
+}
+
+fn priority_grouping(rate: u32) -> anyhow::Result<OrderGrouping> {
+    anyhow::ensure!(rate <= 80_000, "Hyperliquid priority rate exceeds 8 bps");
+    Ok(if rate == 0 { OrderGrouping::Na } else { OrderGrouping::PriorityRate(rate) })
 }
 
 /// Account-level margin snapshot from `clearinghouseState` (scoped to this
@@ -459,7 +470,7 @@ impl Hyperliquid {
         let px = round_price(&self.market.tick, side, price)?;
         let sz = round_size(self.market.sz_decimals, qty)?;
         Ok(self
-            .submit(side, sz, px, reduce_only, TimeInForce::Gtc)
+            .submit(side, sz, px, reduce_only, TimeInForce::Gtc, 0)
             .await?
             .0)
     }
@@ -494,7 +505,7 @@ impl Hyperliquid {
     ) -> anyhow::Result<(ActiveOrder, SubmitTiming)> {
         let px = round_price(&self.market.tick, side, price)?;
         let sz = round_size(self.market.sz_decimals, qty)?;
-        self.submit(side, sz, px, reduce_only, TimeInForce::Alo)
+        self.submit(side, sz, px, reduce_only, TimeInForce::Alo, 0)
             .await
     }
 
@@ -517,7 +528,7 @@ impl Hyperliquid {
             Side::Sell => book.best_bid(),
         };
         Ok(self
-            .market_at(side, qty, reduce_only, opposite_top)
+            .market_at(side, qty, reduce_only, opposite_top, 0)
             .await?
             .0)
     }
@@ -558,8 +569,20 @@ impl Hyperliquid {
         reduce_only: bool,
         opposite_top: f64,
     ) -> anyhow::Result<(ActiveOrder, SubmitTiming)> {
-        self.market_at(side, qty, reduce_only, Some(opposite_top))
-            .await
+        self.place_market_at_timed_priority(side, qty, reduce_only, opposite_top, 0).await
+    }
+
+    /// IOC market order with an explicit Hyperliquid priority rate. `rate`
+    /// is in 1e-8 units: 10_000 is one basis point of filled notional.
+    pub async fn place_market_at_timed_priority(
+        &self,
+        side: Side,
+        qty: f64,
+        reduce_only: bool,
+        opposite_top: f64,
+        rate: u32,
+    ) -> anyhow::Result<(ActiveOrder, SubmitTiming)> {
+        self.market_at(side, qty, reduce_only, Some(opposite_top), rate).await
     }
 
     async fn market_at(
@@ -568,10 +591,11 @@ impl Hyperliquid {
         qty: f64,
         reduce_only: bool,
         opposite_top: Option<f64>,
+        priority_rate: u32,
     ) -> anyhow::Result<(ActiveOrder, SubmitTiming)> {
         let px = crossing_price(&self.market.tick, side, opposite_top)?;
         let sz = round_size(self.market.sz_decimals, qty)?;
-        self.submit(side, sz, px, reduce_only, TimeInForce::Ioc)
+        self.submit(side, sz, px, reduce_only, TimeInForce::Ioc, priority_rate)
             .await
     }
 
@@ -582,11 +606,12 @@ impl Hyperliquid {
         px: Decimal,
         reduce_only: bool,
         tif: TimeInForce,
+        priority_rate: u32,
     ) -> anyhow::Result<(ActiveOrder, SubmitTiming)> {
         check_min_notional(&self.market.coin, sz, px, reduce_only)?;
         let batch = BatchOrder {
             orders: vec![self.order_request(side, sz, px, reduce_only, tif)],
-            grouping: OrderGrouping::Na,
+            grouping: priority_grouping(priority_rate)?,
             builder: None,
         };
         let started = Instant::now();
@@ -764,6 +789,22 @@ impl Hyperliquid {
             .collect()
     }
 
+    /// Every open order on this capsule's dex in one request (weight 20),
+    /// as `(venue-reported coin, order)`. Match coins with
+    /// [`coin_matches_market`]. Lets many capsules sweep orphans with one
+    /// call instead of one weight-20 scan each.
+    pub async fn all_open_orders(&self) -> anyhow::Result<Vec<(String, OrderInfo)>> {
+        acquire_info(20).await;
+        let orders = self
+            .client
+            .open_orders(self.user, self.market.dex_name.clone())
+            .await?;
+        orders
+            .iter()
+            .map(|order| Ok((order.coin.clone(), order_info_from_basic(order)?)))
+            .collect()
+    }
+
     /// Recent account-wide fills from REST. Trade IDs match `userFills` WS,
     /// so callers can reconcile delayed events without double-counting.
     pub async fn recent_fills(&self) -> anyhow::Result<Vec<FillEvent>> {
@@ -783,6 +824,21 @@ impl Hyperliquid {
             .collect()
     }
 
+    /// Fills of the given order ids on this capsule's market, from one
+    /// `userFills` request (actual prices and fees, e.g. to settle an
+    /// operation's traded notional after its orders are terminal). Orders
+    /// older than the endpoint's 2,000-fill window are not found.
+    pub async fn order_fills(&self, oids: &[u64]) -> anyhow::Result<Vec<FillEvent>> {
+        if oids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let fills = self.recent_fills().await?;
+        Ok(fills
+            .into_iter()
+            .filter(|fill| oids.contains(&fill.oid) && coin_matches(&fill.coin, &self.market.coin))
+            .collect())
+    }
+
     /// Perp position on this capsule's market (zeroed default when flat).
     pub async fn position_snapshot(&self) -> anyhow::Result<PositionSnapshot> {
         acquire_info(2).await;
@@ -796,6 +852,23 @@ impl Hyperliquid {
     /// Signed position size (long > 0, short < 0, flat = 0).
     pub async fn position_amt(&self) -> anyhow::Result<f64> {
         Ok(self.position_snapshot().await?.size)
+    }
+
+    /// Every open position on this capsule's dex in one request, keyed by
+    /// the coin name as the exchange reports it (HIP-3 payloads may omit
+    /// the `dex:` prefix — match with [`coin_matches_market`]). Lets a
+    /// process running many capsules on one dex poll positions once.
+    pub async fn all_positions(&self) -> anyhow::Result<HashMap<String, f64>> {
+        acquire_info(2).await;
+        let state = self
+            .client
+            .clearinghouse_state(self.user, self.market.dex_name.clone())
+            .await?;
+        let mut out = HashMap::new();
+        for pos in &state.asset_positions {
+            out.insert(pos.position.coin.clone(), decimal_to_f64(pos.position.szi)?);
+        }
+        Ok(out)
     }
 
     /// Account margin summary (equity, margin used, withdrawable).
@@ -882,11 +955,26 @@ impl Hyperliquid {
     }
 }
 
-/// Resolve a (normalized) coin to its market spec, honoring HIP-3
-/// `dex:COIN` prefixes.
-async fn resolve_market(client: &HttpClient, coin: &str) -> anyhow::Result<MarketSpec> {
-    let dex_name = split_dex(coin);
-    let markets = if let Some(dex_name) = &dex_name {
+/// How long a fetched market list (per dex) is reused by
+/// [`resolve_market`]. Connecting one capsule per market of a dex would
+/// otherwise re-fetch the same list N times (weight 40 each): 88 markets
+/// = 3,520 weight against a 1,200/min budget.
+const MARKET_LIST_TTL: Duration = Duration::from_secs(120);
+
+type MarketList = Vec<hypercore::PerpMarket>;
+
+/// Cached market list of a dex (`None` = main dex). Concurrent misses
+/// wait for the first fetch instead of all fetching.
+async fn market_list(client: &HttpClient, dex_name: &Option<String>) -> anyhow::Result<MarketList> {
+    static CACHE: OnceLock<Mutex<HashMap<Option<String>, (Instant, MarketList)>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut guard = cache.lock().await;
+    if let Some((at, list)) = guard.get(dex_name)
+        && at.elapsed() < MARKET_LIST_TTL
+    {
+        return Ok(list.clone());
+    }
+    let markets = if let Some(dex_name) = dex_name {
         acquire_info(20).await;
         let dex = client
             .perp_dexes()
@@ -900,6 +988,15 @@ async fn resolve_market(client: &HttpClient, coin: &str) -> anyhow::Result<Marke
         acquire_info(20).await;
         client.perps().await?
     };
+    guard.insert(dex_name.clone(), (Instant::now(), markets.clone()));
+    Ok(markets)
+}
+
+/// Resolve a (normalized) coin to its market spec, honoring HIP-3
+/// `dex:COIN` prefixes.
+async fn resolve_market(client: &HttpClient, coin: &str) -> anyhow::Result<MarketSpec> {
+    let dex_name = split_dex(coin);
+    let markets = market_list(client, &dex_name).await?;
     let market = markets
         .into_iter()
         .find(|market| coin_matches(&market.name, coin))
@@ -1143,6 +1240,70 @@ pub async fn stream_book(
     }
 }
 
+/// Stream L2 books for a DYNAMIC set of coins over ONE WebSocket.
+///
+/// The venue caps connections at 100 per IP but subscriptions at 1,000, so
+/// a process following many markets must multiplex them. `coins_rx` carries
+/// the wanted set (raw coin names, normalized here); changes subscribe /
+/// unsubscribe on the live socket. Each `l2Book` frame is a full snapshot,
+/// so books are emitted as `(coin, book)` with the venue-reported coin name
+/// (e.g. `xyz:GOLD`) and the top `depth` levels. Returns when `tx` closes
+/// or `coins_rx` is dropped; the socket reconnects on its own and re-sends
+/// subscriptions.
+pub async fn stream_books(
+    mut coins_rx: tokio::sync::watch::Receiver<Vec<String>>,
+    depth: usize,
+    tx: mpsc::Sender<(String, OrderBook)>,
+) -> anyhow::Result<()> {
+    let (handle, mut stream) = hypercore::mainnet_ws().split();
+    let sub = |coin: String| Subscription::L2Book {
+        coin,
+        n_sig_figs: None,
+        mantissa: None,
+        fast: true,
+    };
+    let mut current: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let apply = |wanted: &[String], current: &mut std::collections::HashSet<String>| {
+        let wanted: std::collections::HashSet<String> = wanted.iter().map(|c| normalize_coin(c)).collect();
+        for coin in current.difference(&wanted) {
+            handle.unsubscribe(sub(coin.clone()));
+        }
+        for coin in wanted.difference(current) {
+            handle.subscribe(sub(coin.clone()));
+        }
+        *current = wanted;
+    };
+    apply(&coins_rx.borrow().clone(), &mut current);
+    loop {
+        tokio::select! {
+            changed = coins_rx.changed() => {
+                if changed.is_err() {
+                    return Ok(());
+                }
+                let wanted = coins_rx.borrow().clone();
+                apply(&wanted, &mut current);
+            }
+            event = stream.next() => {
+                let Some(event) = event else { return Ok(()) };
+                if let Event::Message(Incoming::L2Book(book)) = event {
+                    if !current.contains(&book.coin) {
+                        continue;
+                    }
+                    let (bids, asks) = sdk_book_levels(&book)?;
+                    let book_out = OrderBook::from_sides(
+                        bids.into_iter().take(depth).collect(),
+                        asks.into_iter().take(depth).collect(),
+                    );
+                    if tx.send((book.coin.clone(), book_out)).await.is_err() {
+                        return Ok(());
+                    }
+                }
+            }
+            _ = tx.closed() => return Ok(()),
+        }
+    }
+}
+
 #[derive(Default)]
 struct SourceOverlay {
     bids: BTreeMap<i64, f64>,
@@ -1204,6 +1365,10 @@ pub struct FillEvent {
     pub tid: u64,
     /// True when the fill took liquidity (taker).
     pub crossed: bool,
+    /// Fee charged on this fill in `fee_token` (negative = rebate).
+    pub fee: f64,
+    /// Currency of `fee` (`USDC` on perps).
+    pub fee_token: String,
     /// Exchange timestamp (ms).
     pub time: u64,
     /// Monotonic instant this fill was decoded off the private WebSocket.
@@ -1360,6 +1525,8 @@ fn fill_event(fill: &Fill, recv_at: Instant) -> anyhow::Result<FillEvent> {
         oid: fill.oid,
         tid: fill.tid,
         crossed: fill.crossed,
+        fee: decimal_to_f64(fill.fee)?,
+        fee_token: fill.fee_token.clone(),
         time: fill.time,
     })
 }
@@ -1432,6 +1599,12 @@ fn default_coin_alias(coin: &str) -> Option<&'static str> {
 fn split_dex(coin: &str) -> Option<String> {
     coin.split_once(':')
         .map(|(dex_name, _)| dex_name.to_string())
+}
+
+/// Public alias of [`coin_matches`] for consumers of
+/// [`Hyperliquid::all_positions`].
+pub fn coin_matches_market(candidate: &str, coin: &str) -> bool {
+    coin_matches(candidate, coin)
 }
 
 /// Does an exchange-reported market/position coin name refer to `coin`?
@@ -1749,6 +1922,13 @@ fn decimal_to_f64(value: Decimal) -> anyhow::Result<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ioc_priority_grouping_serializes_as_documented() {
+        assert_eq!(serde_json::to_string(&priority_grouping(0).unwrap()).unwrap(), "\"na\"");
+        assert_eq!(serde_json::to_string(&priority_grouping(10_000).unwrap()).unwrap(), "{\"p\":10000}");
+        assert!(priority_grouping(80_001).is_err());
+    }
 
     fn d(value: &str) -> Decimal {
         value.parse().expect("decimal literal")
@@ -2165,6 +2345,8 @@ mod tests {
         assert_eq!(event.sz, 1.5);
         assert_eq!(event.oid, 77);
         assert!(!event.crossed);
+        assert_eq!(event.fee, 0.01);
+        assert_eq!(event.fee_token, "USDC");
         assert_eq!(event.time, 1_753_200_000_000);
         // The arrival stamp is the caller's, not derived from the payload:
         // it has to stay comparable with other local `Instant`s.

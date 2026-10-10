@@ -20,7 +20,7 @@
 //!   a managed local book with automatic snapshot resync).
 //! - [`lighter`] *(feature `lighter`, default)* — Lighter (zkLighter) perp
 //!   venue capsule (place/modify/cancel/fetch on the market's wire grids,
-//!   positions, account summary) plus [`lighter::stream_book`]
+//!   positions, account summary) plus [`lighter::stream_books`]
 //!   (`order_book/{market_id}` WS channel with nonce-continuity resync).
 //!   Transaction signing runs through the vendored official Go signer
 //!   shared library (`vendor/lighter-signer`).

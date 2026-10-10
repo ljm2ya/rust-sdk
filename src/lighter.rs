@@ -28,10 +28,11 @@
 //! generates): Lighter accepts it for cancels and modifies, so
 //! [`ActiveOrder::order_id`] carries it.
 
+use std::collections::HashMap;
 use std::ffi::{CStr, CString, c_char, c_int, c_longlong, c_void};
 use std::sync::atomic::{AtomicI64, AtomicU32, Ordering};
 use std::sync::{Mutex, OnceLock};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, bail};
 use futures_util::{SinkExt, StreamExt};
@@ -136,8 +137,15 @@ type SignModifyOrderFn = unsafe extern "C" fn(
     c_int,      // api key index
     c_longlong, // account index
 ) -> FfiSignedTx;
-type SignCancelAllFn =
-    unsafe extern "C" fn(c_int, c_longlong, c_int, u8, c_longlong, c_int, c_longlong) -> FfiSignedTx;
+type SignCancelAllFn = unsafe extern "C" fn(
+    c_int,
+    c_longlong,
+    c_int,
+    u8,
+    c_longlong,
+    c_int,
+    c_longlong,
+) -> FfiSignedTx;
 type SignUpdateAccountAssetConfigFn =
     unsafe extern "C" fn(i16, u8, u8, c_longlong, c_int, c_longlong) -> FfiSignedTx;
 type CreateAuthTokenFn = unsafe extern "C" fn(c_longlong, c_int, c_longlong) -> FfiStrOrErr;
@@ -252,7 +260,7 @@ fn signer() -> anyhow::Result<&'static SignerLib> {
                                 .get::<CreateAuthTokenFn>(b"CreateAuthToken\0")
                                 .map_err(|e| e.to_string())?,
                             free: *lib.get::<FreeFn>(b"Free\0").map_err(|e| e.to_string())?,
-                        _lib: lib,
+                            _lib: lib,
                         });
                     }
                 }
@@ -276,7 +284,9 @@ impl SignerLib {
         if ptr.is_null() {
             return None;
         }
-        let value = unsafe { CStr::from_ptr(ptr) }.to_string_lossy().into_owned();
+        let value = unsafe { CStr::from_ptr(ptr) }
+            .to_string_lossy()
+            .into_owned();
         unsafe { (self.free)(ptr as *mut c_void) };
         Some(value)
     }
@@ -285,7 +295,9 @@ impl SignerLib {
         let err = self.take(response.err);
         let tx_info = self.take(response.tx_info);
         let tx_hash = self.take(response.tx_hash);
-        let message_to_sign = self.take(response.message_to_sign).filter(|m| !m.is_empty());
+        let message_to_sign = self
+            .take(response.message_to_sign)
+            .filter(|m| !m.is_empty());
         if let Some(err) = err {
             bail!("lighter signer: {err}");
         }
@@ -336,8 +348,9 @@ impl SignerLib {
         api_key_index: u8,
         account_index: i64,
     ) -> anyhow::Result<String> {
-        let result =
-            unsafe { (self.create_auth_token)(deadline_unix, api_key_index as c_int, account_index) };
+        let result = unsafe {
+            (self.create_auth_token)(deadline_unix, api_key_index as c_int, account_index)
+        };
         let token = self.take(result.str_);
         if let Some(err) = self.take(result.err) {
             bail!("lighter signer CreateAuthToken: {err}");
@@ -379,8 +392,8 @@ fn eth_personal_sign(eth_private_key: &str, message: &str) -> anyhow::Result<Str
     use k256::ecdsa::SigningKey;
     let key_bytes = hex::decode(eth_private_key.trim_start_matches("0x"))
         .context("eth private key is not valid hex")?;
-    let signing_key =
-        SigningKey::from_slice(&key_bytes).context("eth private key is not a valid secp256k1 key")?;
+    let signing_key = SigningKey::from_slice(&key_bytes)
+        .context("eth private key is not a valid secp256k1 key")?;
     let prefixed = format!("\x19Ethereum Signed Message:\n{}{}", message.len(), message);
     let digest = keccak256(prefixed.as_bytes());
     let (signature, recovery_id) = signing_key
@@ -413,7 +426,11 @@ fn base_url() -> String {
 }
 
 fn chain_id_for(url: &str) -> c_int {
-    if url.contains("testnet") { TESTNET_CHAIN_ID } else { MAINNET_CHAIN_ID }
+    if url.contains("testnet") {
+        TESTNET_CHAIN_ID
+    } else {
+        MAINNET_CHAIN_ID
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -434,7 +451,10 @@ async fn get_json<T: serde::de::DeserializeOwned>(
     }
     let response = request.send().await.with_context(|| format!("GET {url}"))?;
     let status = response.status();
-    let body = response.text().await.with_context(|| format!("GET {url}: body"))?;
+    let body = response
+        .text()
+        .await
+        .with_context(|| format!("GET {url}: body"))?;
     if let Ok(result) = serde_json::from_str::<ResultCode>(&body) {
         if result.code != 200 {
             bail!(
@@ -444,7 +464,13 @@ async fn get_json<T: serde::de::DeserializeOwned>(
             );
         }
     } else if !status.is_success() {
-        bail!("lighter GET {url}: HTTP {status}: {body}");
+        if body.contains("Human Verification") {
+            bail!("lighter GET {url}: CloudFront Human Verification (HTTP {status})");
+        }
+        bail!(
+            "lighter GET {url}: HTTP {status}: {}",
+            body.chars().take(240).collect::<String>()
+        );
     }
     serde_json::from_str(&body).with_context(|| format!("GET {url}: decoding {body}"))
 }
@@ -475,7 +501,11 @@ pub async fn send_tx(base: &str, tx: &SignedTx) -> anyhow::Result<String> {
     let parsed: RespSendTx =
         serde_json::from_str(&body).with_context(|| format!("sendTx: decoding {body}"))?;
     if parsed.code != 200 {
-        bail!("lighter sendTx: code {} {}", parsed.code, parsed.message.unwrap_or_default());
+        bail!(
+            "lighter sendTx: code {} {}",
+            parsed.code,
+            parsed.message.unwrap_or_default()
+        );
     }
     parsed.tx_hash.context("sendTx: response had no tx_hash")
 }
@@ -527,7 +557,7 @@ struct OrderBookDetailsResponse {
     spot_order_book_details: Option<Vec<OrderBookDetail>>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 struct OrderBookDetail {
     symbol: String,
     market_id: u16,
@@ -564,20 +594,64 @@ impl OrderBookDetail {
 /// quote (`"LIT/USDC"`, `"ETH/USDC"`).
 pub async fn fetch_market(symbol: &str) -> anyhow::Result<MarketInfo> {
     crate::load_dotenv();
-    let base = base_url();
+    fetch_market_from(&base_url(), symbol).await
+}
+
+async fn fetch_market_from(base: &str, symbol: &str) -> anyhow::Result<MarketInfo> {
     let wanted = symbol.trim().to_uppercase();
     let spot = wanted.contains('/');
-    let response: OrderBookDetailsResponse = get_json(
-        &format!("{base}/api/v1/orderBookDetails"),
-        &[("filter", if spot { "spot" } else { "perp" }.to_owned())],
-        None,
-    )
-    .await?;
-    let pool = if spot { response.spot_order_book_details } else { response.order_book_details };
-    let detail = pool
-        .unwrap_or_default()
-        .into_iter()
+    // One orderBookDetails response covers every market. Share it across
+    // capsules and book streams instead of requesting it for each symbol.
+    enum Entry {
+        Ready(Instant, Vec<OrderBookDetail>),
+        Blocked(Instant),
+    }
+    static CACHE: OnceLock<tokio::sync::Mutex<HashMap<(String, bool), Entry>>> = OnceLock::new();
+    let mut cache = CACHE
+        .get_or_init(|| tokio::sync::Mutex::new(HashMap::new()))
+        .lock()
+        .await;
+    let key = (base.to_owned(), spot);
+    match cache.get(&key) {
+        Some(Entry::Ready(at, _)) if at.elapsed() < Duration::from_secs(600) => {}
+        Some(Entry::Blocked(at)) if at.elapsed() < Duration::from_secs(60) => {
+            bail!("lighter market metadata temporarily blocked by venue; retry later");
+        }
+        _ => {
+            let response: OrderBookDetailsResponse = match get_json(
+                &format!("{base}/api/v1/orderBookDetails"),
+                &[("filter", if spot { "spot" } else { "perp" }.to_owned())],
+                None,
+            )
+            .await
+            {
+                Ok(response) => response,
+                Err(err) => {
+                    let message = format!("{err:#}");
+                    if message.contains("405") || message.contains("429") {
+                        cache.insert(key, Entry::Blocked(Instant::now()));
+                    }
+                    return Err(err);
+                }
+            };
+            let details = if spot {
+                response.spot_order_book_details
+            } else {
+                response.order_book_details
+            };
+            cache.insert(
+                key.clone(),
+                Entry::Ready(Instant::now(), details.unwrap_or_default()),
+            );
+        }
+    }
+    let Some(Entry::Ready(_, details)) = cache.get(&key) else {
+        unreachable!()
+    };
+    let detail = details
+        .iter()
         .find(|detail| detail.symbol.to_uppercase() == wanted && detail.status != "inactive")
+        .cloned()
         .with_context(|| format!("lighter has no active market {wanted}"))?;
     detail.into_market_info()
 }
@@ -688,8 +762,20 @@ struct WireOrder {
     price: String,
     remaining_base_amount: String,
     filled_base_amount: String,
+    #[serde(default)]
+    filled_quote_amount: String,
     is_ask: bool,
     status: String,
+}
+
+/// Executed amounts of one order (from the order record, not per-trade).
+#[derive(Clone, Copy, Debug)]
+pub struct OrderFill {
+    pub side: Side,
+    /// Filled base quantity.
+    pub qty: f64,
+    /// Filled quote amount (USDC).
+    pub quote: f64,
 }
 
 fn order_state(status: &str) -> OrderState {
@@ -702,6 +788,14 @@ fn order_state(status: &str) -> OrderState {
 }
 
 impl WireOrder {
+    fn fill(&self) -> OrderFill {
+        OrderFill {
+            side: if self.is_ask { Side::Sell } else { Side::Buy },
+            qty: self.filled_base_amount.parse().unwrap_or(0.0),
+            quote: self.filled_quote_amount.parse().unwrap_or(0.0),
+        }
+    }
+
     fn into_order_info(self) -> OrderInfo {
         OrderInfo {
             order_id: self.client_order_index,
@@ -776,13 +870,17 @@ fn book_side(levels: Vec<WireBookOrder>) -> Vec<(f64, f64)> {
     // orderBookOrders lists individual orders; aggregate per price level.
     let mut side: BTreeMap<i64, f64> = BTreeMap::new();
     for level in levels {
-        let (Ok(price), Ok(qty)) = (level.price.parse::<f64>(), level.remaining_base_amount.parse::<f64>())
-        else {
+        let (Ok(price), Ok(qty)) = (
+            level.price.parse::<f64>(),
+            level.remaining_base_amount.parse::<f64>(),
+        ) else {
             continue;
         };
         *side.entry(crate::book::price_key(price)).or_default() += qty;
     }
-    side.into_iter().map(|(key, qty)| (crate::book::key_to_price(key), qty)).collect()
+    side.into_iter()
+        .map(|(key, qty)| (crate::book::key_to_price(key), qty))
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -825,9 +923,10 @@ impl Lighter {
         crate::load_dotenv();
         let base = base_url();
         let account_index = match std::env::var("LIGHTER_ACCOUNT_INDEX") {
-            Ok(value) if !value.trim().is_empty() => {
-                value.trim().parse().context("LIGHTER_ACCOUNT_INDEX is not an integer")?
-            }
+            Ok(value) if !value.trim().is_empty() => value
+                .trim()
+                .parse()
+                .context("LIGHTER_ACCOUNT_INDEX is not an integer")?,
             _ => {
                 let wallet = std::env::var("WALLET_ADDRESS")
                     .context("LIGHTER_ACCOUNT_INDEX or WALLET_ADDRESS is required")?;
@@ -915,7 +1014,10 @@ impl Lighter {
     /// with >60s slack). Trading mode only.
     pub fn auth_token(&self) -> anyhow::Result<String> {
         self.require_trading()?;
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
         let mut cache = self.auth.lock().expect("auth cache lock");
         if let Some(cached) = cache.as_ref() {
             if cached.expires_unix - now > 60 {
@@ -924,7 +1026,10 @@ impl Lighter {
         }
         let expires_unix = now + 600;
         let token = signer()?.auth_token(expires_unix, self.api_key_index, self.account_index)?;
-        *cache = Some(AuthCache { token: token.clone(), expires_unix });
+        *cache = Some(AuthCache {
+            token: token.clone(),
+            expires_unix,
+        });
         Ok(token)
     }
 
@@ -941,7 +1046,10 @@ impl Lighter {
             None,
         )
         .await?;
-        Ok(OrderBook::from_sides(book_side(response.bids), book_side(response.asks)))
+        Ok(OrderBook::from_sides(
+            book_side(response.bids),
+            book_side(response.asks),
+        ))
     }
 
     /// Mid of the current top of book.
@@ -1216,32 +1324,68 @@ impl Lighter {
             .collect())
     }
 
-    /// Look one order up by client order index: active orders first, then the
-    /// recent inactive orders (filled/canceled land there). `None` when the
-    /// venue does not know the order (yet) — sequencing is asynchronous, so
-    /// poll after placing.
-    pub async fn fetch_order(&self, order_id: u64) -> anyhow::Result<Option<OrderInfo>> {
-        let active = self.open_orders().await?;
-        if let Some(info) = active.into_iter().find(|info| info.order_id == order_id) {
-            return Ok(Some(info));
-        }
+    /// Active orders across every market for this account (one REST call).
+    pub async fn all_open_orders(&self) -> anyhow::Result<Vec<(u16, OrderInfo)>> {
         let auth = self.auth_token()?;
         let response: OrdersResponse = get_json(
-            &format!("{}/api/v1/accountInactiveOrders", self.base),
-            &[
-                ("account_index", self.account_index.to_string()),
-                ("market_id", self.market.market_id.to_string()),
-                ("limit", "100".to_owned()),
-            ],
+            &format!("{}/api/v1/accountActiveOrders", self.base),
+            &[("account_index", self.account_index.to_string())],
             Some(&auth),
         )
         .await?;
         Ok(response
             .orders
             .into_iter()
-            .filter(|order| order.market_index == self.market.market_id)
-            .find(|order| order.client_order_index == order_id)
+            .map(|order| (order.market_index, order.into_order_info()))
+            .collect())
+    }
+
+    /// Look one order up by client order index: active orders first, then the
+    /// recent inactive orders (filled/canceled land there). `None` when the
+    /// venue does not know the order (yet) — sequencing is asynchronous, so
+    /// poll after placing.
+    pub async fn fetch_order(&self, order_id: u64) -> anyhow::Result<Option<OrderInfo>> {
+        Ok(self
+            .fetch_wire_order(order_id)
+            .await?
             .map(WireOrder::into_order_info))
+    }
+
+    /// Executed base/quote amounts of one order (`None` when the venue
+    /// does not know it). The quote amount is the venue's own sum over the
+    /// fills, i.e. the actual traded notional.
+    pub async fn fetch_order_fill(&self, order_id: u64) -> anyhow::Result<Option<OrderFill>> {
+        Ok(self
+            .fetch_wire_order(order_id)
+            .await?
+            .map(|order| order.fill()))
+    }
+
+    async fn fetch_wire_order(&self, order_id: u64) -> anyhow::Result<Option<WireOrder>> {
+        let auth = self.auth_token()?;
+        for path in [
+            "/api/v1/accountActiveOrders",
+            "/api/v1/accountInactiveOrders",
+        ] {
+            let mut params = vec![
+                ("account_index", self.account_index.to_string()),
+                ("market_id", self.market.market_id.to_string()),
+            ];
+            if path.ends_with("InactiveOrders") {
+                params.push(("limit", "100".to_owned()));
+            }
+            let response: OrdersResponse =
+                get_json(&format!("{}{path}", self.base), &params, Some(&auth)).await?;
+            let found = response
+                .orders
+                .into_iter()
+                .filter(|order| order.market_index == self.market.market_id)
+                .find(|order| order.client_order_index == order_id);
+            if found.is_some() {
+                return Ok(found);
+            }
+        }
+        Ok(None)
     }
 
     /// Enable/disable a spot asset (by asset id, e.g. LIT = 2) as unified
@@ -1289,7 +1433,11 @@ impl Lighter {
             None,
         )
         .await?;
-        response.accounts.into_iter().next().context("lighter: account not found")
+        response
+            .accounts
+            .into_iter()
+            .next()
+            .context("lighter: account not found")
     }
 
     /// Position state on this capsule's market.
@@ -1307,7 +1455,11 @@ impl Lighter {
             position: size * position.sign as f64,
             avg_entry_price: position.avg_entry_price.parse().unwrap_or(0.0),
             unrealized_pnl: position.unrealized_pnl.parse().unwrap_or(0.0),
-            liquidation_price: position.liquidation_price.parse().ok().filter(|px| *px > 0.0),
+            liquidation_price: position
+                .liquidation_price
+                .parse()
+                .ok()
+                .filter(|px| *px > 0.0),
         })
     }
 
@@ -1344,6 +1496,8 @@ struct WsBookMessage {
     #[serde(rename = "type")]
     kind: String,
     #[serde(default)]
+    channel: String,
+    #[serde(default)]
     order_book: Option<WsBookPayload>,
 }
 
@@ -1372,84 +1526,122 @@ fn ws_levels(levels: Vec<WsBookLevel>) -> Vec<(f64, f64)> {
         .collect()
 }
 
-/// Stream a managed book for `symbol` over the `order_book/{market_id}` WS
-/// channel: full snapshot on subscribe, zero-size deletes applied to a local
-/// book, nonce-continuity checked (gaps trigger a resubscribe). Reconnects
-/// forever; returns when the receiver is dropped.
-pub async fn stream_book(symbol: &str, tx: mpsc::Sender<BookUpdate>) -> anyhow::Result<()> {
+/// Stream many Lighter order books through one WebSocket connection. The
+/// watched symbol list is shared by all application subscribers.
+pub async fn stream_books(
+    mut wanted: tokio::sync::watch::Receiver<Vec<String>>,
+    tx: mpsc::Sender<(String, BookUpdate)>,
+) -> anyhow::Result<()> {
     crate::load_dotenv();
-    let market = fetch_market(symbol).await?;
     let url = ws_url(&base_url());
-    let subscribe = serde_json::json!({
-        "type": "subscribe",
-        "channel": format!("order_book/{}", market.market_id),
-    })
-    .to_string();
-
-    loop {
-        let mut last_nonce: Option<u64> = None;
-        let mut book = OrderBook::default();
-        let mut synced = false;
-
+    let mut retry = Duration::from_secs(1);
+    'reconnect: loop {
+        // A batch of newly enabled symbols should produce one handshake.
+        loop {
+            match tokio::time::timeout(Duration::from_millis(750), wanted.changed()).await {
+                Ok(Ok(())) => continue,
+                Ok(Err(_)) => return Ok(()),
+                Err(_) => break,
+            }
+        }
+        let symbols = wanted.borrow_and_update().clone();
+        if symbols.is_empty() {
+            if wanted.changed().await.is_err() {
+                return Ok(());
+            }
+            continue;
+        }
+        let mut markets = HashMap::new();
+        let mut ids = Vec::with_capacity(symbols.len());
+        for symbol in &symbols {
+            let info = fetch_market(symbol).await?;
+            ids.push(info.market_id);
+            markets.insert(
+                info.market_id,
+                (symbol.clone(), OrderBook::default(), None::<u64>),
+            );
+        }
         let (mut socket, _) = match connect_async(&url).await {
             Ok(ok) => ok,
             Err(err) => {
-                if tx.send(BookUpdate::Notice(format!("lighter ws connect failed: {err}"))).await.is_err() {
+                let waf = matches!(&err, tokio_tungstenite::tungstenite::Error::Http(response)
+                    if response.headers().contains_key("x-amzn-waf-action"));
+                let delay = if waf { Duration::from_secs(300) } else { retry };
+                let notice = if waf {
+                    "lighter ws blocked by CloudFront CAPTCHA (HTTP 405); retrying in 300s"
+                        .to_owned()
+                } else {
+                    format!("lighter ws connect failed: {err}")
+                };
+                if tx
+                    .send((String::new(), BookUpdate::Notice(notice)))
+                    .await
+                    .is_err()
+                {
                     return Ok(());
                 }
-                tokio::time::sleep(Duration::from_secs(1)).await;
+                tokio::time::sleep(delay).await;
+                retry = (retry * 2).min(Duration::from_secs(30));
                 continue;
             }
         };
-        if socket.send(Message::Text(subscribe.clone().into())).await.is_err() {
-            continue;
-        }
-
+        retry = Duration::from_secs(1);
+        let mut next_id = 0;
+        let mut subscribe_tick = tokio::time::interval(Duration::from_millis(100));
+        subscribe_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut ping = tokio::time::interval(Duration::from_secs(50));
         ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-
-        'conn: loop {
+        loop {
             tokio::select! {
+                changed = wanted.changed() => {
+                    if changed.is_err() { return Ok(()); }
+                    continue 'reconnect;
+                }
+                _ = subscribe_tick.tick(), if next_id < ids.len() => {
+                    let request = serde_json::json!({"type":"subscribe", "channel":format!("order_book/{}", ids[next_id])});
+                    if socket.send(Message::Text(request.to_string().into())).await.is_err() {
+                        continue 'reconnect;
+                    }
+                    next_id += 1;
+                }
                 _ = ping.tick() => {
                     if socket.send(Message::Text(r#"{"type":"ping"}"#.into())).await.is_err() {
-                        break 'conn;
+                        continue 'reconnect;
                     }
                 }
-                message = socket.next() => {
-                    let Some(Ok(message)) = message else { break 'conn };
-                    let text = match message {
+                incoming = socket.next() => {
+                    let Some(Ok(incoming)) = incoming else { continue 'reconnect; };
+                    let text = match incoming {
                         Message::Text(text) => text,
                         Message::Ping(payload) => {
-                            let _ = socket.send(Message::Pong(payload)).await;
+                            if socket.send(Message::Pong(payload)).await.is_err() { continue 'reconnect; }
                             continue;
                         }
-                        Message::Close(_) => break 'conn,
+                        Message::Close(_) => continue 'reconnect,
                         _ => continue,
                     };
-                    let Ok(parsed) = serde_json::from_str::<WsBookMessage>(&text) else { continue };
-                    let Some(payload) = parsed.order_book else { continue };
-                    match parsed.kind.as_str() {
+                    let Ok(message) = serde_json::from_str::<WsBookMessage>(&text) else { continue; };
+                    if message.kind == "ping" {
+                        if socket.send(Message::Text(r#"{"type":"pong"}"#.into())).await.is_err() { continue 'reconnect; }
+                        continue;
+                    }
+                    let Some(id) = message.channel.rsplit(':').next().and_then(|part| part.parse::<u16>().ok()) else { continue; };
+                    let Some((symbol, book, last_nonce)) = markets.get_mut(&id) else { continue; };
+                    let Some(payload) = message.order_book else { continue; };
+                    match message.kind.as_str() {
                         "subscribed/order_book" => {
                             book.load_levels(0, ws_levels(payload.bids), ws_levels(payload.asks), true);
-                            last_nonce = Some(payload.nonce);
-                            synced = true;
+                            *last_nonce = Some(payload.nonce);
                         }
                         "update/order_book" => {
-                            if !synced {
-                                continue;
+                            let Some(previous) = *last_nonce else { continue; };
+                            if payload.begin_nonce != previous {
+                                if tx.send((symbol.clone(), BookUpdate::Notice(format!(
+                                    "lighter book gap (begin_nonce {} != last {previous}); reconnecting", payload.begin_nonce
+                                )))).await.is_err() { return Ok(()); }
+                                continue 'reconnect;
                             }
-                            if let Some(previous) = last_nonce {
-                                if payload.begin_nonce != previous {
-                                    if tx.send(BookUpdate::Notice(format!(
-                                        "lighter book gap (begin_nonce {} != last {previous}); resyncing",
-                                        payload.begin_nonce
-                                    ))).await.is_err() {
-                                        return Ok(());
-                                    }
-                                    break 'conn;
-                                }
-                            }
-                            last_nonce = Some(payload.nonce);
+                            *last_nonce = Some(payload.nonce);
                             let (mut bids, mut asks) = book.levels(usize::MAX);
                             apply_ws_side(&mut bids, ws_levels(payload.bids));
                             apply_ws_side(&mut asks, ws_levels(payload.asks));
@@ -1457,16 +1649,12 @@ pub async fn stream_book(symbol: &str, tx: mpsc::Sender<BookUpdate>) -> anyhow::
                         }
                         _ => continue,
                     }
-                    if tx.send(BookUpdate::Book(book.clone())).await.is_err() {
+                    if tx.send((symbol.clone(), BookUpdate::Book(book.clone()))).await.is_err() {
                         return Ok(());
                     }
                 }
             }
         }
-        if tx.send(BookUpdate::Notice("lighter ws reconnecting".to_owned())).await.is_err() {
-            return Ok(());
-        }
-        tokio::time::sleep(Duration::from_millis(250)).await;
     }
 }
 
@@ -1474,7 +1662,10 @@ pub async fn stream_book(symbol: &str, tx: mpsc::Sender<BookUpdate>) -> anyhow::
 fn apply_ws_side(levels: &mut Vec<(f64, f64)>, changes: Vec<(f64, f64)>) {
     for (price, qty) in changes {
         let key = crate::book::price_key(price);
-        match levels.iter().position(|(px, _)| crate::book::price_key(*px) == key) {
+        match levels
+            .iter()
+            .position(|(px, _)| crate::book::price_key(*px) == key)
+        {
             Some(at) if qty == 0.0 => {
                 levels.remove(at);
             }
@@ -1525,7 +1716,10 @@ pub async fn change_api_key(
     let mut tx_info: serde_json::Value =
         serde_json::from_str(&signed.tx_info).context("ChangePubKey tx_info is not JSON")?;
     tx_info["L1Sig"] = serde_json::Value::String(l1_sig);
-    let signed = SignedTx { tx_info: tx_info.to_string(), ..signed };
+    let signed = SignedTx {
+        tx_info: tx_info.to_string(),
+        ..signed
+    };
     send_tx(base, &signed).await
 }
 
@@ -1543,8 +1737,21 @@ pub async fn bootstrap_api_key(
     let base = base_url();
     let (private_key, public_key) = generate_api_key()?;
     let lib = signer()?;
-    lib.create_client(&base, &private_key, chain_id_for(&base), api_key_index, account_index)?;
-    change_api_key(&base, eth_private_key, &public_key, api_key_index, account_index).await?;
+    lib.create_client(
+        &base,
+        &private_key,
+        chain_id_for(&base),
+        api_key_index,
+        account_index,
+    )?;
+    change_api_key(
+        &base,
+        eth_private_key,
+        &public_key,
+        api_key_index,
+        account_index,
+    )
+    .await?;
 
     // Wait for the sequencer to apply the key change.
     for _ in 0..30 {
@@ -1563,6 +1770,58 @@ pub async fn bootstrap_api_key(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn market_metadata_is_shared_across_symbols_and_blocks_repeated_challenges() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        fn serve_once(
+            status: &'static str,
+            body: &'static str,
+        ) -> (String, std::thread::JoinHandle<()>) {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let base = format!("http://{}", listener.local_addr().unwrap());
+            let worker = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0u8; 2048];
+                let _ = stream.read(&mut request).unwrap();
+                write!(
+                    stream,
+                    "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .unwrap();
+            });
+            (base, worker)
+        }
+
+        let body = r#"{"order_book_details":[{"symbol":"BTC","market_id":1,"status":"active","taker_fee":"0.02","maker_fee":"0","min_base_amount":"0.001","min_quote_amount":"10","supported_size_decimals":4,"supported_price_decimals":2},{"symbol":"ETH","market_id":2,"status":"active","taker_fee":"0.02","maker_fee":"0","min_base_amount":"0.001","min_quote_amount":"10","supported_size_decimals":4,"supported_price_decimals":2}],"spot_order_book_details":null}"#;
+        let (base, worker) = serve_once("200 OK", body);
+        assert_eq!(fetch_market_from(&base, "BTC").await.unwrap().market_id, 1);
+        assert_eq!(fetch_market_from(&base, "ETH").await.unwrap().market_id, 2);
+        worker.join().unwrap();
+
+        let (base, worker) = serve_once(
+            "405 Method Not Allowed",
+            "<title>Human Verification</title>",
+        );
+        assert!(
+            fetch_market_from(&base, "BTC")
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("Human Verification")
+        );
+        assert!(
+            fetch_market_from(&base, "ETH")
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("temporarily blocked")
+        );
+        worker.join().unwrap();
+    }
 
     fn market() -> MarketInfo {
         MarketInfo {
@@ -1648,17 +1907,32 @@ mod tests {
         assert_eq!(order_state("filled"), OrderState::Filled);
         assert_eq!(order_state("canceled"), OrderState::Canceled);
         assert_eq!(order_state("canceled-post-only"), OrderState::Canceled);
-        assert_eq!(order_state("canceled-margin-not-allowed"), OrderState::Canceled);
+        assert_eq!(
+            order_state("canceled-margin-not-allowed"),
+            OrderState::Canceled
+        );
         assert_eq!(order_state("weird"), OrderState::Rejected);
     }
 
     #[test]
     fn aggregates_book_orders_per_level() {
         let side = book_side(vec![
-            WireBookOrder { price: "100.5".into(), remaining_base_amount: "1.0".into() },
-            WireBookOrder { price: "100.5".into(), remaining_base_amount: "2.0".into() },
-            WireBookOrder { price: "101.0".into(), remaining_base_amount: "0.5".into() },
-            WireBookOrder { price: "bogus".into(), remaining_base_amount: "1".into() },
+            WireBookOrder {
+                price: "100.5".into(),
+                remaining_base_amount: "1.0".into(),
+            },
+            WireBookOrder {
+                price: "100.5".into(),
+                remaining_base_amount: "2.0".into(),
+            },
+            WireBookOrder {
+                price: "101.0".into(),
+                remaining_base_amount: "0.5".into(),
+            },
+            WireBookOrder {
+                price: "bogus".into(),
+                remaining_base_amount: "1".into(),
+            },
         ]);
         assert_eq!(side.len(), 2);
         assert!((side[0].1 - 3.0).abs() < 1e-9);
@@ -1668,7 +1942,10 @@ mod tests {
     #[test]
     fn applies_ws_state_changes_with_zero_deletes() {
         let mut levels = vec![(100.0, 1.0), (101.0, 2.0)];
-        apply_ws_side(&mut levels, vec![(100.0, 0.0), (102.0, 3.0), (101.0, 5.0), (103.0, 0.0)]);
+        apply_ws_side(
+            &mut levels,
+            vec![(100.0, 0.0), (102.0, 3.0), (101.0, 5.0), (103.0, 0.0)],
+        );
         levels.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
         assert_eq!(levels, vec![(101.0, 5.0), (102.0, 3.0)]);
     }
@@ -1700,8 +1977,14 @@ mod tests {
 
     #[test]
     fn ws_url_and_chain_id_derivation() {
-        assert_eq!(ws_url("https://mainnet.zklighter.elliot.ai"), "wss://mainnet.zklighter.elliot.ai/stream");
-        assert_eq!(ws_url("https://mainnet.zklighter.elliot.ai/"), "wss://mainnet.zklighter.elliot.ai/stream");
+        assert_eq!(
+            ws_url("https://mainnet.zklighter.elliot.ai"),
+            "wss://mainnet.zklighter.elliot.ai/stream"
+        );
+        assert_eq!(
+            ws_url("https://mainnet.zklighter.elliot.ai/"),
+            "wss://mainnet.zklighter.elliot.ai/stream"
+        );
         assert_eq!(chain_id_for("https://mainnet.zklighter.elliot.ai"), 304);
         assert_eq!(chain_id_for("https://testnet.zklighter.elliot.ai"), 300);
     }

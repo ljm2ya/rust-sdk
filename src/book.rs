@@ -90,6 +90,11 @@ impl OrderBook {
         self.synced = synced;
     }
 
+    /// `(last_update_id, last_stream_u)` for gap diagnostics.
+    pub fn sequence(&self) -> (u64, Option<u64>) {
+        (self.last_update_id, self.last_stream_u)
+    }
+
     pub fn mark_unsynced(&mut self) {
         self.synced = false;
     }
@@ -106,7 +111,13 @@ impl OrderBook {
             if event.final_id < next_update_id {
                 return true;
             }
-            if event.first_id > next_update_id {
+            // Two valid "first event" forms: the spot-style overlap
+            // (U <= lastUpdateId+1 <= u) and the futures `pu` chain, where the
+            // event's previous-final id IS the snapshot's lastUpdateId even
+            // though its U is far beyond it (ids between are non-depth
+            // updates). Rejecting the latter made every resync a gap.
+            let chained = event.prev_final_id == Some(self.last_update_id);
+            if !chained && event.first_id > next_update_id {
                 return false;
             }
             self.apply_levels(event.bids, event.asks);
@@ -283,6 +294,18 @@ mod tests {
 
     fn event(first: u64, last: u64, prev: Option<u64>, bids: Vec<(f64, f64)>, asks: Vec<(f64, f64)>) -> DepthEvent {
         DepthEvent { first_id: first, final_id: last, prev_final_id: prev, bids, asks }
+    }
+
+    #[test]
+    fn syncs_via_futures_pu_chain() {
+        let mut book = OrderBook::default();
+        book.load_levels(58784, vec![(63.10, 5.0)], vec![(63.20, 7.0)], false);
+        // U far past lastUpdateId, but pu == lastUpdateId: valid first event.
+        assert!(book.apply(event(65914, 67318, Some(58784), vec![(63.11, 2.0)], vec![])));
+        assert!(book.is_synced());
+        assert_eq!(book.best_bid(), Some(63.11));
+        // Next must chain on u.
+        assert!(!book.apply(event(67400, 67500, Some(67319), vec![], vec![])));
     }
 
     #[test]

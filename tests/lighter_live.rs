@@ -25,7 +25,7 @@
 //! - Run with `--test-threads=1`; never run in CI.
 
 use rusk_sdk::book::BookUpdate;
-use rusk_sdk::lighter::{Lighter, PositionSnapshot, bootstrap_api_key, fetch_market, stream_book};
+use rusk_sdk::lighter::{Lighter, PositionSnapshot, bootstrap_api_key, fetch_market, stream_books};
 use rusk_sdk::order::{OrderState, Side};
 
 fn live_market() -> String {
@@ -169,12 +169,13 @@ async fn live_book_and_stream() {
 
     let (tx, mut rx) = tokio::sync::mpsc::channel(64);
     let market = live_market();
-    let stream = tokio::spawn(async move { stream_book(&market, tx).await });
+    let (wanted_tx, wanted_rx) = tokio::sync::watch::channel(vec![market]);
+    let stream = tokio::spawn(async move { stream_books(wanted_rx, tx).await });
 
     let mut books = 0;
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
     while books < 5 {
-        let update = tokio::time::timeout_at(deadline, rx.recv())
+        let (_market, update) = tokio::time::timeout_at(deadline, rx.recv())
             .await
             .expect("stream produced fewer than 5 books in 30s")
             .expect("stream ended prematurely");
@@ -191,6 +192,7 @@ async fn live_book_and_stream() {
             BookUpdate::Notice(notice) => println!("stream notice: {notice}"),
         }
     }
+    drop(wanted_tx);
     drop(rx);
     stream.abort();
 }
